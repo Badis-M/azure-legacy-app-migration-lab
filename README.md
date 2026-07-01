@@ -1,174 +1,310 @@
-# Kubernetes Local Deployment
+# Azure Legacy App Migration Lab
 
-This folder contains the Kubernetes local deployment for the Customer Orders API.
+This project demonstrates the progressive migration of a legacy-style application toward a cloud-native Azure platform.
 
-## Purpose
+The goal is not only to deploy an application, but to show a realistic modernization path using containers, Kubernetes, Terraform, Azure, CI, and operational practices.
 
-This phase validates that the containerized application can run as a Kubernetes workload before moving to Azure AKS.
+## Current Status
 
-The goal is to test the core Kubernetes objects locally:
+The project currently covers:
 
-- Namespace
-- ConfigMap
-- Deployment
-- Service
-- Readiness probe
-- Liveness probe
-- Resource requests and limits
-- Kustomize base and local overlay
+- Legacy FastAPI application baseline
+- Docker containerization
+- Docker Compose with PostgreSQL
+- Local Kubernetes deployment with kind
+- Kustomize base and overlays
+- PostgreSQL StatefulSet with PersistentVolumeClaim
+- GitHub Actions CI
+- Terraform Azure foundation
+- Terraform modules
+- Remote Terraform state in Azure Blob Storage
+- Azure Container Registry
+- Docker image push to ACR
+- Azure Kubernetes overlay using the ACR image
+- Makefile automation
+- Terraform backend bootstrap script
 
-## Why Local Kubernetes First
-
-Running locally avoids Azure costs and reduces troubleshooting complexity.
-
-Before deploying to AKS, we validate that:
-
-- the image starts correctly
-- the application receives its configuration
-- Kubernetes probes can call the `/health` endpoint
-- the service can route traffic to the pod
-- basic resource requests and limits are defined
-- manifests can be applied consistently through Kustomize
-
-## Why Kustomize
-
-Kustomize lets us separate common Kubernetes manifests from environment-specific configuration.
-
-Current structure:
+## Architecture Progression
 
 ```text
-k8s/
-├── base/
-│   ├── namespace.yaml
-│   ├── configmap.yaml
-│   ├── deployment.yaml
-│   ├── service.yaml
-│   └── kustomization.yaml
-└── overlays/
-    └── local/
-        └── kustomization.yaml
+Legacy FastAPI app
+→ Docker image
+→ Docker Compose + PostgreSQL
+→ Kubernetes local with kind
+→ Kustomize overlays
+→ PostgreSQL StatefulSet + PVC
+→ GitHub Actions CI
+→ Terraform Azure Resource Group + ACR
+→ Remote Terraform state in Azure Blob Storage
+→ Docker image pushed to Azure Container Registry
+→ Azure Kubernetes overlay prepared for AKS
 ```
 
-The `base` folder contains shared Kubernetes resources.
-
-The `overlays/local` folder points to the base and represents the local deployment environment.
-
-Later, we can add:
+## Repository Structure
 
 ```text
-k8s/overlays/azure/
+.
+├── legacy-app/
+│   └── Initial legacy-style FastAPI application
+├── containerized-app/
+│   └── Dockerized FastAPI application with PostgreSQL support
+├── k8s/
+│   ├── base/
+│   └── overlays/
+│       ├── local/
+│       └── azure/
+├── infra/
+│   └── terraform/
+│       ├── modules/
+│       ├── main.tf
+│       ├── providers.tf
+│       ├── variables.tf
+│       └── outputs.tf
+├── scripts/
+│   └── bootstrap-tfstate-backend.sh
+├── .github/
+│   └── workflows/
+└── Makefile
 ```
 
-for AKS-specific configuration.
+## Application
 
-## Prerequisites
+The application exposes a simple customer/orders API.
 
-- Docker Desktop running
-- kubectl installed
-- kind installed
+Main endpoints:
 
-## Create a Local Cluster
+```text
+GET /
+GET /health
+GET /api/customers
+GET /api/orders
+GET /api/orders/failed
+```
+
+## Local Docker Workflow
+
+Build and run the application stack locally:
+
+```bash
+cd containerized-app
+docker compose up --build
+```
+
+Test:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/api/customers
+```
+
+## Local Kubernetes Workflow
+
+Build the image:
+
+```bash
+make docker-build
+```
+
+Create and prepare the kind cluster:
 
 ```bash
 kind create cluster --name azure-migration-lab
-```
-
-## Build the Local Image
-
-From the repository root:
-
-```bash
-docker build -t customer-orders-api:local ./containerized-app
-```
-
-## Load the Image into kind
-
-```bash
 kind load docker-image customer-orders-api:local --name azure-migration-lab
 ```
 
-## Deploy with Kustomize
-
-From the repository root:
+Deploy locally:
 
 ```bash
-kubectl apply -k k8s/overlays/local/
+make k8s-apply-local
 ```
 
-This replaces:
-
-```bash
-kubectl apply -f k8s/base/
-```
-
-Using Kustomize makes the deployment more explicit and prepares the project for GitOps tools such as Argo CD.
-
-## Validate the Deployment
-
-```bash
-kubectl get all -n customer-orders
-kubectl get pods -n customer-orders
-kubectl describe pod -n customer-orders
-```
-
-## Access the Application
+Access the API:
 
 ```bash
 kubectl port-forward -n customer-orders service/customer-orders-api 8000:80
 ```
 
-Then test:
+Test:
 
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/api/customers
-curl http://127.0.0.1:8000/api/orders/failed
 ```
 
-## Cleanup
+Cleanup:
 
 ```bash
-kubectl delete -k k8s/overlays/local/
-kind delete cluster --name azure-migration-lab
+make k8s-delete-local
 ```
 
-## Troubleshooting
+## Azure Foundation
 
-### Namespace Not Found
+Terraform currently provisions:
 
-If resources fail because the namespace does not exist yet, avoid applying individual YAML files randomly.
+- Azure Resource Group
+- Azure Container Registry Basic
+- Tags for FinOps tracking
 
-Use:
+The Terraform state is stored remotely in Azure Blob Storage.
+
+The backend is bootstrapped separately from the application infrastructure to avoid destroying the state backend during normal `terraform destroy` operations.
+
+## Terraform Workflow
 
 ```bash
-kubectl apply -k k8s/overlays/local/
+make tf-fmt
+make tf-validate
+make tf-plan
+make tf-apply
 ```
 
-or create the namespace first:
+Destroy application resources:
 
 ```bash
-kubectl apply -f k8s/base/namespace.yaml
-kubectl apply -f k8s/base/
+make tf-destroy
 ```
 
-The preferred approach for this project is Kustomize.
+The remote Terraform state backend is not destroyed by `make tf-destroy`.
 
-## Design Notes
+## Azure Container Registry Workflow
 
-The application image is loaded directly into the local kind cluster instead of being pushed to a remote registry. This keeps the phase cost-free and avoids introducing Azure Container Registry too early.
+Login to ACR:
 
-The Kubernetes manifests are written manually to make the underlying objects explicit before introducing Helm or GitOps in later phases.
+```bash
+make acr-login
+```
 
-Kustomize is introduced early because Argo CD can deploy directly from Kustomize overlays.
+Build the image:
 
-## Known Limitations
+```bash
+make docker-build
+```
 
-- No Helm chart yet.
-- No GitOps workflow yet.
-- No Azure Container Registry yet.
-- No AKS deployment yet.
-- No external database yet.
-- No autoscaling yet.
-- No ingress controller yet.
+Push the image to ACR:
 
-These topics will be introduced progressively.
+```bash
+make docker-push-acr
+```
+
+Verify:
+
+```bash
+az acr repository list --name acrazlegacydev001 --output table
+az acr repository show-tags \
+  --name acrazlegacydev001 \
+  --repository customer-orders-api \
+  --output table
+```
+
+Current pushed image:
+
+```text
+acrazlegacydev001.azurecr.io/customer-orders-api:dev
+```
+
+## Kubernetes Overlays
+
+Local overlay:
+
+```text
+k8s/overlays/local/
+```
+
+Uses:
+
+```text
+customer-orders-api:local
+imagePullPolicy: Never
+```
+
+Azure overlay:
+
+```text
+k8s/overlays/azure/
+```
+
+Uses:
+
+```text
+acrazlegacydev001.azurecr.io/customer-orders-api:dev
+imagePullPolicy: IfNotPresent
+```
+
+Render overlays:
+
+```bash
+kubectl kustomize k8s/overlays/local/
+kubectl kustomize k8s/overlays/azure/
+```
+
+## CI
+
+GitHub Actions validates:
+
+- Docker build
+- Kubernetes manifest rendering with Kustomize
+- YAML linting
+
+## Makefile
+
+Common commands:
+
+```bash
+make help
+make tf-plan
+make docker-build
+make docker-push-acr
+make k8s-render-local
+make k8s-apply-local
+make k8s-delete-local
+```
+
+The backend bootstrap command exists for initial setup or backend reconstruction:
+
+```bash
+make tf-backend-bootstrap
+```
+
+It is not part of the normal daily workflow.
+
+## Cost and Cleanup Notes
+
+Current Azure resources are lightweight:
+
+- One Resource Group for the application infrastructure
+- One Basic Azure Container Registry
+- One separate Resource Group and Storage Account for Terraform remote state
+
+AKS has not been created yet.
+
+Before creating AKS, the project will add cost guardrails:
+
+- Free tier AKS control plane
+- One node only
+- Controlled VM size
+- No Log Analytics at first
+- No public LoadBalancer unless needed
+- Explicit destroy workflow
+- Azure resource verification after destroy
+
+## Next Planned Steps
+
+Planned next phases:
+
+```text
+V8   AKS minimal with Terraform
+V8.1 AKS AcrPull integration through managed identity
+V8.2 Deploy application to AKS using the Azure overlay
+V8.3 Validate PVC behavior on AKS
+V8.4 Destroy and verify cleanup
+V9   Improve CI/CD
+V10  Azure Key Vault and cloud-native secret management
+V11  Observability with Prometheus/Grafana
+V12  Runbooks and RCA documentation
+```
+
+## Interview Summary
+
+```text
+I built a progressive Azure migration lab starting from a legacy-style FastAPI application, then modernized it through Docker, Docker Compose, Kubernetes, Kustomize, PostgreSQL StatefulSets, Terraform modules, Azure Container Registry, remote Terraform state, and CI validation. The project is intentionally cost-aware and prepares for a controlled AKS deployment.
+```

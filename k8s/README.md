@@ -1,64 +1,27 @@
-# Kubernetes Local Deployment
+# Kubernetes Deployment
 
-This folder contains the Kubernetes local deployment for the Customer Orders API and PostgreSQL.
+This folder contains the Kubernetes manifests for the Customer Orders API and PostgreSQL.
 
-## Purpose
+The project uses Kustomize to separate shared Kubernetes resources from environment-specific configuration.
 
-This phase validates that the application can run as a multi-service Kubernetes workload before moving to Azure AKS.
+## Current Scope
 
-The local Kubernetes stack includes:
+The Kubernetes stack includes:
 
-- Customer Orders API
-- PostgreSQL
 - Namespace
 - ConfigMap
-- Secret
-- API Deployment
+- Secret with demo-only local credentials
+- FastAPI Deployment
+- API Service
 - PostgreSQL StatefulSet
-- ClusterIP Services
-- Headless Service
-- PersistentVolumeClaim
-- Readiness and liveness probes
-- Resource requests and limits
-- Kustomize base and local overlay
+- PostgreSQL Service
+- PostgreSQL Headless Service
+- PostgreSQL init SQL ConfigMap
+- PersistentVolumeClaim through StatefulSet volumeClaimTemplates
+- Local overlay
+- Azure overlay
 
-## Architecture
-
-```text
-localhost:8000
-→ kubectl port-forward
-→ Service customer-orders-api:80
-→ Pod customer-orders-api:8000
-→ Service postgres:5432
-→ Pod postgres-0:5432
-→ PersistentVolumeClaim postgres-data-postgres-0
-```
-
-## Why PostgreSQL Uses a StatefulSet
-
-The API is stateless. If the API Pod is deleted, Kubernetes can recreate it without losing application data.
-
-PostgreSQL is stateful. If the PostgreSQL Pod is deleted, the database files must survive.
-
-For this reason, PostgreSQL uses:
-
-- StatefulSet
-- Headless Service
-- PersistentVolumeClaim
-
-## Deployment vs StatefulSet
-
-```text
-Deployment
-→ good for stateless workloads
-→ example: FastAPI application
-
-StatefulSet
-→ good for stateful workloads
-→ example: PostgreSQL
-```
-
-## Kustomize Structure
+## Structure
 
 ```text
 k8s/
@@ -74,22 +37,145 @@ k8s/
 │   ├── service.yaml
 │   └── kustomization.yaml
 └── overlays/
-    └── local/
+    ├── local/
+    │   └── kustomization.yaml
+    └── azure/
         └── kustomization.yaml
 ```
 
-## Deploy Locally
+## Architecture
 
-Create the kind cluster:
+```text
+Client
+→ kubectl port-forward
+→ Service customer-orders-api:80
+→ Pod customer-orders-api:8000
+→ Service postgres:5432
+→ Pod postgres-0:5432
+→ PersistentVolumeClaim postgres-data-postgres-0
+```
+
+## Why StatefulSet for PostgreSQL
+
+The API is stateless:
+
+```text
+Pod deleted
+→ new Pod can be created
+→ no persistent application data is lost
+```
+
+PostgreSQL is stateful:
+
+```text
+Pod deleted
+→ database files must survive
+```
+
+For this reason PostgreSQL uses:
+
+- StatefulSet
+- PersistentVolumeClaim
+- Headless Service
+
+## Local Overlay
+
+Path:
+
+```text
+k8s/overlays/local/
+```
+
+Purpose:
+
+```text
+Run the stack on a local kind cluster.
+```
+
+The local overlay uses the local Docker image:
+
+```text
+customer-orders-api:local
+```
+
+and:
+
+```text
+imagePullPolicy: Never
+```
+
+This works because the image is loaded directly into kind:
+
+```bash
+kind load docker-image customer-orders-api:local --name azure-migration-lab
+```
+
+## Azure Overlay
+
+Path:
+
+```text
+k8s/overlays/azure/
+```
+
+Purpose:
+
+```text
+Prepare the manifests for AKS.
+```
+
+The Azure overlay replaces the local API image with the ACR image:
+
+```text
+acrazlegacydev001.azurecr.io/customer-orders-api:dev
+```
+
+and sets:
+
+```text
+imagePullPolicy: IfNotPresent
+```
+
+This is required because AKS cannot use images from local Docker. It must pull images from a registry such as Azure Container Registry.
+
+## Render Manifests
+
+Render local manifests:
+
+```bash
+kubectl kustomize k8s/overlays/local/
+```
+
+Render Azure manifests:
+
+```bash
+kubectl kustomize k8s/overlays/azure/
+```
+
+Expected local image:
+
+```text
+customer-orders-api:local
+```
+
+Expected Azure image:
+
+```text
+acrazlegacydev001.azurecr.io/customer-orders-api:dev
+```
+
+## Local Deployment
+
+Create a kind cluster:
 
 ```bash
 kind create cluster --name azure-migration-lab
 ```
 
-Build the API image:
+Build the local image:
 
 ```bash
-docker build -t customer-orders-api:local ./containerized-app
+make docker-build
 ```
 
 Load the image into kind:
@@ -98,47 +184,27 @@ Load the image into kind:
 kind load docker-image customer-orders-api:local --name azure-migration-lab
 ```
 
-Apply the local overlay:
+Deploy:
 
 ```bash
-kubectl apply -k k8s/overlays/local/
+make k8s-apply-local
 ```
 
-## Validate
+Check resources:
 
 ```bash
 kubectl get all -n customer-orders
 kubectl get pvc -n customer-orders
 kubectl get pods -n customer-orders
-kubectl get svc -n customer-orders
 ```
 
-Expected PostgreSQL Pod name:
-
-```text
-postgres-0
-```
-
-Expected PVC name:
-
-```text
-postgres-data-postgres-0
-```
-
-## Check Logs
-
-```bash
-kubectl logs -n customer-orders statefulset/postgres
-kubectl logs -n customer-orders deployment/customer-orders-api
-```
-
-## Access the Application
+Access the API:
 
 ```bash
 kubectl port-forward -n customer-orders service/customer-orders-api 8000:80
 ```
 
-Then test:
+Test:
 
 ```bash
 curl http://127.0.0.1:8000/health
@@ -147,49 +213,105 @@ curl http://127.0.0.1:8000/api/orders
 curl http://127.0.0.1:8000/api/orders/failed
 ```
 
-## Cleanup
-
-Delete Kubernetes resources:
+Cleanup:
 
 ```bash
-kubectl delete -k k8s/overlays/local/
+make k8s-delete-local
 ```
 
-Delete the kind cluster:
+## Azure Deployment Status
+
+The Azure overlay is ready, but AKS has not been created yet.
+
+Next AKS steps:
+
+```text
+1. Create minimal AKS with Terraform
+2. Grant AKS permission to pull from ACR
+3. Get AKS credentials
+4. Apply k8s/overlays/azure/
+5. Validate API and PostgreSQL on AKS
+6. Destroy resources after validation
+```
+
+## Storage Behavior
+
+Local kind:
+
+```text
+PVC
+→ local Kubernetes storage inside the kind/Docker environment
+```
+
+AKS later:
+
+```text
+PVC
+→ AKS StorageClass
+→ Azure Managed Disk
+```
+
+This difference will be validated during the AKS phase.
+
+## Secret Notes
+
+The current Kubernetes Secret contains demo-only credentials for the lab.
+
+This is acceptable for the local learning phase, but it is not the final cloud security pattern.
+
+Future Azure phase:
+
+```text
+Azure Key Vault
+Workload Identity
+Secrets Store CSI Driver or External Secrets pattern
+```
+
+## Troubleshooting
+
+Check API logs:
 
 ```bash
-kind delete cluster --name azure-migration-lab
+kubectl logs -n customer-orders deployment/customer-orders-api
 ```
 
-## Security Notes
+Check PostgreSQL logs:
 
-The Kubernetes Secret in this phase contains demo credentials only.
+```bash
+kubectl logs -n customer-orders statefulset/postgres
+```
 
-Kubernetes Secrets are base64-encoded by default, not a production-grade secret management solution by themselves.
+Check PVC:
 
-In later Azure phases, secrets should move toward:
+```bash
+kubectl get pvc -n customer-orders
+kubectl describe pvc postgres-data-postgres-0 -n customer-orders
+```
 
-- Azure Key Vault
-- Workload Identity
-- Key Vault CSI Driver
-- external secret management patterns
+Check image references:
 
-## Storage Notes
-
-This local setup uses a PersistentVolumeClaim through the default storage behavior available in the local Kubernetes environment.
-
-This is enough for learning StatefulSet and PVC concepts.
-
-In Azure AKS, storage classes and persistent volumes will need to be reviewed carefully for cost, performance, backup, and lifecycle management.
+```bash
+kubectl kustomize k8s/overlays/local/ | grep -A2 "image:"
+kubectl kustomize k8s/overlays/azure/ | grep -A2 "image:"
+```
 
 ## Known Limitations
 
-- PostgreSQL still runs locally inside Kubernetes.
-- No managed Azure PostgreSQL yet.
-- No production backup strategy yet.
-- No database migration tool yet.
-- No network policies yet.
-- No Key Vault integration yet.
-- No AKS deployment yet.
+Current limitations:
 
-These topics will be addressed progressively.
+- PostgreSQL still runs inside Kubernetes, not as Azure managed PostgreSQL
+- No Azure Key Vault integration yet
+- No network policies yet
+- No ingress controller yet
+- No public exposure yet
+- No AKS deployment yet
+- No backup strategy yet
+- No production-grade secret management yet
+
+These will be addressed progressively.
+
+## Interview Summary
+
+```text
+I used Kustomize to separate local and Azure Kubernetes configurations. The local overlay uses a kind-loaded image, while the Azure overlay references the image pushed to Azure Container Registry. PostgreSQL runs as a StatefulSet with a PVC to reflect its stateful nature.
+```
