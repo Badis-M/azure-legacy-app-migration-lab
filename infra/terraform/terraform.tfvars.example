@@ -1,5 +1,5 @@
 location     = "francecentral"
 project_name = "azure-legacy-migration-lab"
 environment  = "dev"
-owner        = "badis"
-acr_name     = "acrazlegacydev001"
+owner        = "your-name"
+acr_name     = "acruniquename001"
