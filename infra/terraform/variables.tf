@@ -25,3 +25,39 @@ variable "acr_name" {
   description = "Globally unique Azure Container Registry name. Lowercase letters and numbers only."
   type        = string
 }
+
+variable "aks_name" {
+  description = "AKS cluster name."
+  type        = string
+  default     = "aks-azure-legacy-migration-dev"
+}
+
+variable "aks_dns_prefix" {
+  description = "AKS DNS prefix."
+  type        = string
+  default     = "aks-azlegacy-dev"
+}
+
+variable "aks_node_count" {
+  description = "AKS default node pool node count."
+  type        = number
+  default     = 1
+}
+
+variable "aks_node_resource_group_name" {
+  description = "Short name for the AKS managed node resource group."
+  type        = string
+  default     = "rg-aksnodes-azmig-dev"
+}
+
+variable "aks_location" {
+  description = "Azure region for the AKS cluster."
+  type        = string
+  default     = "westeurope"
+}
+
+variable "aks_node_vm_size" {
+  description = "AKS default node pool VM size."
+  type        = string
+  default     = "Standard_B2s"
+}

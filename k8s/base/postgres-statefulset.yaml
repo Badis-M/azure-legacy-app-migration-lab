@@ -22,6 +22,9 @@ spec:
           image: postgres:17-alpine
           ports:
             - containerPort: 5432
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           envFrom:
             - configMapRef:
                 name: customer-orders-config
