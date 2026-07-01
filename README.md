@@ -115,7 +115,7 @@ Developer workstation
 └── Azure
     ├── Resource Group
     ├── Azure Container Registry
-    │   └── acrazlegacydev001.azurecr.io/customer-orders-api:dev
+    │   └── <acr-login-server>/customer-orders-api:dev
     ├── Azure Blob Storage remote Terraform state
     └── Azure Kubernetes Service
         ├── System-assigned managed identity
@@ -273,7 +273,7 @@ k8s/overlays/azure/
 Uses:
 
 ```text
-acrazlegacydev001.azurecr.io/customer-orders-api:dev
+<acr-login-server>/customer-orders-api:dev
 imagePullPolicy: IfNotPresent
 ```
 
@@ -308,9 +308,11 @@ The backend is bootstrapped separately from the application infrastructure to av
 
 The remote backend uses:
 
+The concrete backend resource names are intentionally represented as placeholders in this public documentation. They are configured through Terraform backend configuration and local Azure CLI context.
+
 ```text
-Resource Group:  rg-tfstate-azure-migration-lab-dev
-Storage Account: sttfstatebadisazmig001
+Resource Group:  <tfstate-resource-group>
+Storage Account: <tfstate-storage-account>
 Container:       tfstate
 State key:       azure-legacy-migration-lab/dev.tfstate
 ```
@@ -369,8 +371,8 @@ The cluster was validated with:
 
 ```bash
 az aks get-credentials \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --overwrite-existing
 
 kubectl get nodes -o wide
@@ -380,7 +382,7 @@ Expected result:
 
 ```text
 NAME                             STATUS   VERSION
-aks-system-06526520-vmss000000   Ready    v1.35.5
+aks-system-xxxxxxxx-vmss000000   Ready    v1.35.5
 ```
 
 Before applying Kubernetes manifests to AKS, always verify the current context:
@@ -393,7 +395,7 @@ kubectl get nodes -o wide
 Expected context:
 
 ```text
-aks-azure-legacy-migration-dev
+<aks-cluster-name>
 ```
 
 ---
@@ -421,9 +423,9 @@ make docker-push-acr
 Verify:
 
 ```bash
-az acr repository list --name acrazlegacydev001 --output table
+az acr repository list --name <acr-name> --output table
 az acr repository show-tags \
-  --name acrazlegacydev001 \
+  --name <acr-name> \
   --repository customer-orders-api \
   --output table
 ```
@@ -431,7 +433,7 @@ az acr repository show-tags \
 Current pushed image:
 
 ```text
-acrazlegacydev001.azurecr.io/customer-orders-api:dev
+<acr-login-server>/customer-orders-api:dev
 ```
 
 For AKS nodes running on `linux/amd64`, the image can be rebuilt and pushed explicitly for the target platform:
@@ -439,7 +441,7 @@ For AKS nodes running on `linux/amd64`, the image can be rebuilt and pushed expl
 ```bash
 docker buildx build \
   --platform linux/amd64 \
-  -t acrazlegacydev001.azurecr.io/customer-orders-api:dev \
+  -t <acr-login-server>/customer-orders-api:dev \
   ./containerized-app \
   --push
 ```
@@ -473,13 +475,13 @@ Validated result:
 
 ```text
 NAME                                   READY   STATUS    RESTARTS   AGE
-customer-orders-api-58879fd869-zdgq7   1/1     Running   0          10m
+customer-orders-api-xxxxxxxxxx-xxxxx   1/1     Running   0          10m
 postgres-0                             1/1     Running   0          7m47s
 ```
 
 ```text
 NAME                             STATUS   ROLES    VERSION
-aks-system-06526520-vmss000000   Ready    <none>   v1.35.5
+aks-system-xxxxxxxx-vmss000000   Ready    <none>   v1.35.5
 ```
 
 ```text
@@ -568,8 +570,8 @@ Resolution:
 ```bash
 kubectl config current-context
 az aks get-credentials \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --overwrite-existing
 kubectl get nodes -o wide
 ```
@@ -588,11 +590,11 @@ no match for platform in manifest
 Resolution:
 
 ```bash
-ACR_ID=$(az acr show --name acrazlegacydev001 --query id -o tsv)
+ACR_ID=$(az acr show --name <acr-name> --query id -o tsv)
 
 KUBELET_OBJECT_ID=$(az aks show \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --query "identityProfile.kubeletidentity.objectId" \
   -o tsv)
 
@@ -608,7 +610,7 @@ Then rebuild and push the image for AKS node architecture:
 ```bash
 docker buildx build \
   --platform linux/amd64 \
-  -t acrazlegacydev001.azurecr.io/customer-orders-api:dev \
+  -t <acr-login-server>/customer-orders-api:dev \
   ./containerized-app \
   --push
 ```
@@ -745,7 +747,7 @@ After destroy, verify Azure resources if needed:
 
 ```bash
 az resource list \
-  --resource-group rg-azure-legacy-migration-lab-dev \
+  --resource-group <app-resource-group> \
   --output table
 ```
 
@@ -756,6 +758,9 @@ The Terraform backend resource group is intentionally separate and is not destro
 ## Documentation
 
 Main operational documentation:
+
+Public documentation uses placeholders for Azure resource names where possible. This avoids exposing a precise inventory of personal or temporary cloud resources while keeping the deployment workflow reproducible.
+
 
 ```text
 docs/troubleshooting-aks-azure.md

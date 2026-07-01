@@ -1,5 +1,7 @@
 # AKS Azure Troubleshooting Notes
 
+> Note: concrete Azure resource names are intentionally represented as placeholders in this public document. The troubleshooting flow, commands and root causes are preserved, but the exact temporary lab resource identifiers are not exposed.
+
 This document captures the main issues encountered while deploying the `customer-orders` application to Azure Kubernetes Service (AKS), and how each issue was investigated and fixed.
 
 The purpose of this document is to show the operational troubleshooting path, not only the final happy path.
@@ -20,11 +22,11 @@ Final observed state:
 
 ```text
 NAME                                   READY   STATUS    RESTARTS   AGE
-customer-orders-api-58879fd869-zdgq7   1/1     Running   0          5m1s
+customer-orders-api-xxxxxxxxxx-xxxxx   1/1     Running   0          5m1s
 postgres-0                             1/1     Running   0          2m8s
 
 NAME                             STATUS   ROLES    AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION     CONTAINER-RUNTIME
-aks-system-06526520-vmss000000   Ready    <none>   57m   v1.35.5   10.224.0.4    <none>        Ubuntu 24.04.4 LTS   6.8.0-1059-azure   containerd://2.2.4-2
+aks-system-xxxxxxxx-vmss000000   Ready    <none>   57m   v1.35.5   10.224.0.4    <none>        Ubuntu 24.04.4 LTS   6.8.0-1059-azure   containerd://2.2.4-2
 
 NAME                       STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
 postgres-data-postgres-0   Bound    pvc-8660dd9e-0f59-4ca3-bd2b-165e5a3b67d9   1Gi        RWO            default        2m9s
@@ -47,9 +49,9 @@ The lab deploys a small cloud migration platform on Azure:
 Main Azure resources:
 
 ```text
-Resource Group: rg-azure-legacy-migration-lab-dev
-ACR:            acrazlegacydev001
-AKS:            aks-azure-legacy-migration-dev
+Resource Group: <app-resource-group>
+ACR:            <acr-name>
+AKS:            <aks-cluster-name>
 AKS location:   austriaeast
 Namespace:      customer-orders
 ```
@@ -129,8 +131,8 @@ Then credentials were retrieved:
 
 ```bash
 az aks get-credentials \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --overwrite-existing
 ```
 
@@ -143,7 +145,7 @@ kubectl get nodes -o wide
 Result:
 
 ```text
-aks-system-06526520-vmss000000   Ready   v1.35.5
+aks-system-xxxxxxxx-vmss000000   Ready   v1.35.5
 ```
 
 ### Lessons learned
@@ -154,8 +156,8 @@ Useful validation command:
 
 ```bash
 az aks show \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --query "{state:provisioningState, power:powerState.code, location:location, fqdn:fqdn}" \
   --output table
 ```
@@ -185,7 +187,7 @@ Azure manifests were applied while the active kubeconfig context was still the l
 The Azure overlay referenced the private ACR image:
 
 ```text
-acrazlegacydev001.azurecr.io/customer-orders-api:dev
+<acr-login-server>/customer-orders-api:dev
 ```
 
 The local kind cluster had no credentials to pull from ACR, so the local pod failed.
@@ -196,8 +198,8 @@ The AKS credentials were retrieved and merged into kubeconfig:
 
 ```bash
 az aks get-credentials \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --overwrite-existing
 ```
 
@@ -211,7 +213,7 @@ kubectl get nodes -o wide
 Expected context:
 
 ```text
-aks-azure-legacy-migration-dev
+<aks-cluster-name>
 ```
 
 Expected node name pattern:
@@ -268,7 +270,7 @@ The image tag existed in ACR:
 
 ```bash
 az acr repository show-tags \
-  --name acrazlegacydev001 \
+  --name <acr-name> \
   --repository customer-orders-api \
   --output table
 ```
@@ -282,7 +284,7 @@ dev
 The ACR role assignment was checked:
 
 ```bash
-ACR_ID=$(az acr show --name acrazlegacydev001 --query id -o tsv)
+ACR_ID=$(az acr show --name <acr-name> --query id -o tsv)
 
 az role assignment list \
   --scope "$ACR_ID" \
@@ -294,8 +296,8 @@ The AKS kubelet identity was checked:
 
 ```bash
 KUBELET_OBJECT_ID=$(az aks show \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --query "identityProfile.kubeletidentity.objectId" \
   -o tsv)
 
@@ -327,11 +329,11 @@ There were two contributing factors:
 An explicit `AcrPull` role assignment was created for the kubelet identity object ID:
 
 ```bash
-ACR_ID=$(az acr show --name acrazlegacydev001 --query id -o tsv)
+ACR_ID=$(az acr show --name <acr-name> --query id -o tsv)
 
 KUBELET_OBJECT_ID=$(az aks show \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --query "identityProfile.kubeletidentity.objectId" \
   -o tsv)
 
@@ -347,7 +349,7 @@ Then the image was rebuilt and pushed explicitly for the AKS node platform:
 ```bash
 docker buildx build \
   --platform linux/amd64 \
-  -t acrazlegacydev001.azurecr.io/customer-orders-api:dev \
+  -t <acr-login-server>/customer-orders-api:dev \
   ./containerized-app \
   --push
 ```
@@ -362,7 +364,7 @@ kubectl get pods -n customer-orders
 The API pod then became healthy:
 
 ```text
-customer-orders-api-58879fd869-zdgq7   1/1   Running
+customer-orders-api-xxxxxxxxxx-xxxxx   1/1   Running
 ```
 
 ### Lessons learned
@@ -377,14 +379,14 @@ kubectl describe pod <pod-name> -n customer-orders
 
 ```bash
 az aks show \
-  --resource-group rg-azure-legacy-migration-lab-dev \
-  --name aks-azure-legacy-migration-dev \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
   --query "identityProfile.kubeletidentity"
 ```
 
 ```bash
 az role assignment list \
-  --scope "$(az acr show --name acrazlegacydev001 --query id -o tsv)" \
+  --scope "$(az acr show --name <acr-name> --query id -o tsv)" \
   --role AcrPull \
   --output table
 ```
@@ -510,10 +512,10 @@ kubectl get pvc -n customer-orders
 Final result:
 
 ```text
-customer-orders-api-58879fd869-zdgq7   1/1   Running
+customer-orders-api-xxxxxxxxxx-xxxxx   1/1   Running
 postgres-0                             1/1   Running
 
-aks-system-06526520-vmss000000         Ready
+aks-system-xxxxxxxx-vmss000000         Ready
 
 postgres-data-postgres-0               Bound
 ```
