@@ -1,5 +1,5 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: postgres
   namespace: customer-orders
@@ -7,6 +7,7 @@ metadata:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: azure-legacy-app-migration-lab
 spec:
+  serviceName: postgres-headless
   replicas: 1
   selector:
     matchLabels:
@@ -27,6 +28,8 @@ spec:
             - secretRef:
                 name: postgres-secret
           volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
             - name: postgres-init-sql
               mountPath: /docker-entrypoint-initdb.d/init.sql
               subPath: init.sql
@@ -62,3 +65,12 @@ spec:
         - name: postgres-init-sql
           configMap:
             name: postgres-init-sql
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

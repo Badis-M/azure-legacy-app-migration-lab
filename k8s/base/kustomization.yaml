@@ -6,7 +6,8 @@ resources:
   - configmap.yaml
   - secret.yaml
   - postgres-init-configmap.yaml
-  - postgres-deployment.yaml
+  - postgres-headless-service.yaml
+  - postgres-statefulset.yaml
   - postgres-service.yaml
   - deployment.yaml
   - service.yaml
