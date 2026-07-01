@@ -1,110 +1,150 @@
 # Kubernetes Local Deployment
 
-This folder contains the first Kubernetes version of the Customer Orders API.
+This folder contains the Kubernetes local deployment for the Customer Orders API and PostgreSQL.
 
 ## Purpose
 
-This phase validates that the containerized application can run as a Kubernetes workload before moving to Azure AKS.
+This phase validates that the application can run as a multi-service Kubernetes workload before moving to Azure AKS.
 
-The goal is to test the core Kubernetes objects locally:
+The local Kubernetes stack includes:
 
+- Customer Orders API
+- PostgreSQL
 - Namespace
 - ConfigMap
-- Deployment
-- Service
-- Readiness probe
-- Liveness probe
+- Secret
+- Deployments
+- Services
+- Readiness and liveness probes
 - Resource requests and limits
+- Kustomize base and local overlay
 
-## Why Local Kubernetes First
+## Architecture
 
-Running locally avoids Azure costs and reduces troubleshooting complexity.
+```text
+localhost:8000
+→ kubectl port-forward
+→ Service customer-orders-api:80
+→ Pod customer-orders-api:8000
+→ Service postgres:5432
+→ Pod postgres:5432
+```
 
-Before deploying to AKS, we validate that:
+## Why PostgreSQL in Kubernetes
 
-- the image starts correctly
-- the application receives its configuration
-- Kubernetes probes can call the `/health` endpoint
-- the service can route traffic to the pod
-- basic resource limits are defined
+Docker Compose validated the multi-service application locally.
 
-## Prerequisites
+This phase translates the same architecture into Kubernetes primitives:
 
-- Docker Desktop running
-- kubectl installed
-- kind installed
+```text
+Docker Compose service
+→ Kubernetes Deployment + Service
+```
 
-## Create a Local Cluster
+The goal is to prepare the application for AKS without using Azure yet.
+
+## Kustomize Structure
+
+```text
+k8s/
+├── base/
+│   ├── namespace.yaml
+│   ├── configmap.yaml
+│   ├── secret.yaml
+│   ├── postgres-deployment.yaml
+│   ├── postgres-service.yaml
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── kustomization.yaml
+└── overlays/
+    └── local/
+        └── kustomization.yaml
+```
+
+## Deploy Locally
+
+Create the kind cluster:
 
 ```bash
 kind create cluster --name azure-migration-lab
 ```
 
-## Build the Local Image
-
-From the repository root:
+Build the API image:
 
 ```bash
 docker build -t customer-orders-api:local ./containerized-app
 ```
 
-## Load the Image into kind
+Load the image into kind:
 
 ```bash
 kind load docker-image customer-orders-api:local --name azure-migration-lab
 ```
 
-## Deploy to Kubernetes
+Apply the local overlay:
 
 ```bash
-kubectl apply -f k8s/base/
+kubectl apply -k k8s/overlays/local/
 ```
 
-## Validate the Deployment
+## Validate
 
 ```bash
 kubectl get all -n customer-orders
 kubectl get pods -n customer-orders
-kubectl describe pod -n customer-orders
+kubectl get svc -n customer-orders
 ```
 
-## Access the Application
+Check logs:
+
+```bash
+kubectl logs -n customer-orders deployment/customer-orders-api
+kubectl logs -n customer-orders deployment/postgres
+```
+
+Port-forward the API:
 
 ```bash
 kubectl port-forward -n customer-orders service/customer-orders-api 8000:80
 ```
 
-Then test:
+Test:
 
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/api/customers
+curl http://127.0.0.1:8000/api/orders
 curl http://127.0.0.1:8000/api/orders/failed
 ```
 
 ## Cleanup
 
 ```bash
-kubectl delete -f k8s/base/
+kubectl delete -k k8s/overlays/local/
 kind delete cluster --name azure-migration-lab
 ```
 
-## Design Notes
+## Security Notes
 
-This deployment intentionally keeps the setup simple.
+The Kubernetes Secret in this phase contains demo credentials only.
 
-The application image is loaded directly into the local kind cluster instead of being pushed to a remote registry. This keeps the phase cost-free and avoids introducing Azure Container Registry too early.
+Kubernetes Secrets are base64-encoded by default, not strongly encrypted by themselves.
 
-The Kubernetes manifests are written manually to make the underlying objects explicit before introducing Helm or GitOps in later phases.
+In later Azure phases, secrets should move toward:
+
+- Azure Key Vault
+- Workload Identity
+- Key Vault CSI Driver
+- external secret management patterns
 
 ## Known Limitations
 
-- No Helm chart yet.
-- No GitOps workflow yet.
-- No Azure Container Registry yet.
-- No AKS deployment yet.
-- No external database yet.
-- No autoscaling yet.
-- No ingress controller yet.
+- PostgreSQL is not persistent yet.
+- PostgreSQL runs as a Deployment for learning simplicity.
+- No StatefulSet yet.
+- No PersistentVolumeClaim yet.
+- No production-grade secret management yet.
+- No managed Azure PostgreSQL yet.
+- No network policies yet.
 
-These topics will be introduced progressively.
+These topics will be addressed progressively.

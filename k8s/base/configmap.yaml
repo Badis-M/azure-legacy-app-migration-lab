@@ -6,4 +6,8 @@ metadata:
 data:
   APP_NAME: "Customer Orders API"
   APP_ENV: "kubernetes-local"
-  APP_VERSION: "0.2.0"
+  APP_VERSION: "0.4.0"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "customer_orders"
+  POSTGRES_DB: "customer_orders"
