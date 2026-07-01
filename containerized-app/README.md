@@ -1,23 +1,50 @@
-# Containerized Application
+# Containerized Application with PostgreSQL
 
-This folder contains the containerized version of the legacy Customer Orders API.
+This folder contains the containerized version of the Customer Orders API.
 
 ## Purpose
 
-This phase demonstrates the first modernization step: moving from a locally executed application to a reproducible container runtime.
+This phase adds a local PostgreSQL database to make the migration scenario more realistic.
 
-The goal is not to change the business logic yet. The goal is to package the same application in a way that can later be deployed to Kubernetes and Azure AKS.
+The application is no longer limited to in-memory demo data. It now reads customers and orders from PostgreSQL when running through Docker Compose.
 
-## What Changed Compared to `legacy-app`
+## What This Phase Demonstrates
 
-- The application now has a Dockerfile.
-- Runtime dependencies are installed inside the image.
-- The service can be started with Docker Compose.
-- Configuration is still provided through environment variables.
-- A Docker healthcheck validates the `/health` endpoint.
-- The application is closer to a Kubernetes-ready workload.
+- Multi-container local environment
+- API and database separation
+- PostgreSQL initialization through SQL scripts
+- Environment-based database configuration
+- Docker Compose service networking
+- Local validation before Kubernetes migration
 
-## Run with Docker Compose
+## Services
+
+The Docker Compose stack contains:
+
+```text
+customer-orders-api
+postgres
+```
+
+## How Networking Works
+
+Inside Docker Compose, services can communicate by service name.
+
+The API connects to PostgreSQL using:
+
+```text
+postgres:5432
+```
+
+`postgres` is the Docker Compose service name, not a public DNS record.
+
+From your host machine, the API is available on:
+
+```text
+localhost:8000
+```
+
+## Run the Stack
 
 From this folder:
 
@@ -25,48 +52,68 @@ From this folder:
 docker compose up --build
 ```
 
-Then test the API:
+Then test:
 
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/api/customers
+curl http://127.0.0.1:8000/api/orders
 curl http://127.0.0.1:8000/api/orders/failed
 ```
 
-Stop the container:
+## Stop the Stack
 
 ```bash
 docker compose down
 ```
 
-## Build Manually
+## Stop and Remove the Database Volume
+
+Use this when you want to reset the database data:
 
 ```bash
-docker build -t legacy-customer-orders-api:local .
+docker compose down -v
 ```
 
-## Run Manually
+## PostgreSQL Initialization
 
-```bash
-docker run --rm -p 8000:8000 --env-file .env.example legacy-customer-orders-api:local
+The database is initialized from:
+
+```text
+db/init.sql
 ```
 
-## Design Notes
+This script creates the required tables and inserts demo data.
 
-This containerization phase keeps the application intentionally simple.
+## Configuration
 
-The image uses Python slim to reduce size while keeping the build process readable for learning purposes.
+The API reads its database connection settings from environment variables:
 
-The container runs Uvicorn directly. A production-grade deployment could later introduce stricter runtime hardening, non-root execution, dependency pinning policies, vulnerability scanning, and Kubernetes-native probes.
+```text
+DB_HOST
+DB_PORT
+DB_NAME
+DB_USER
+DB_PASSWORD
+```
+
+For local learning, Docker Compose contains non-sensitive demo values.
+
+Do not use this pattern for production secrets.
+
+## Security Notes
+
+This phase intentionally uses local demo credentials to keep the lab simple.
+
+In later phases, secrets will be moved to Kubernetes Secrets and then Azure Key Vault.
 
 ## Known Limitations
 
-- No external PostgreSQL database yet.
-- No Redis integration yet.
-- No RabbitMQ integration yet.
-- No Kubernetes manifests yet.
-- No image vulnerability scanning yet.
-- No CI/CD pipeline yet.
-- No Azure Container Registry yet.
+- No database migrations tool yet.
+- No connection pooling yet.
+- No Kubernetes PostgreSQL deployment yet.
+- No managed Azure PostgreSQL yet.
+- No secret manager yet.
+- No retry/backoff strategy yet.
 
-These topics will be addressed in later migration phases.
+These topics will be addressed progressively.

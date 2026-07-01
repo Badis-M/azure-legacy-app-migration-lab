@@ -6,5 +6,36 @@ services:
     container_name: customer-orders-api
     ports:
       - "8000:8000"
-    env_file:
-      - .env.example
+    environment:
+      APP_NAME: "Customer Orders API"
+      APP_ENV: "docker-compose"
+      APP_VERSION: "0.3.0"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_NAME: "customer_orders"
+      DB_USER: "app_user"
+      DB_PASSWORD: "app_password"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: customer-orders-postgres
+    environment:
+      POSTGRES_DB: "customer_orders"
+      POSTGRES_USER: "app_user"
+      POSTGRES_PASSWORD: "app_password"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_user -d customer_orders"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
