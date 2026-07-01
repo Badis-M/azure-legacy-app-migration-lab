@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: customer-orders-config
+  namespace: customer-orders
+data:
+  APP_NAME: "Customer Orders API"
+  APP_ENV: "kubernetes-local"
+  APP_VERSION: "0.2.0"

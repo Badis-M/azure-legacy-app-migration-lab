@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-orders-api
+  namespace: customer-orders
+  labels:
+    app.kubernetes.io/name: customer-orders-api
+    app.kubernetes.io/part-of: azure-legacy-app-migration-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: customer-orders-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: customer-orders-api
+    spec:
+      containers:
+        - name: customer-orders-api
+          image: customer-orders-api:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: customer-orders-config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"

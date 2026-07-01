@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: customer-orders
+  labels:
+    app.kubernetes.io/name: customer-orders-api
+    app.kubernetes.io/part-of: azure-legacy-app-migration-lab
