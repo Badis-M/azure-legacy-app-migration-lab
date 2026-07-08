@@ -3,6 +3,7 @@ SHELL := /bin/bash
 TF_DIR := infra/terraform
 APP_DIR := containerized-app
 K8S_LOCAL_OVERLAY := k8s/overlays/local
+K8S_AZURE_OVERLAY := k8s/overlays/azure
 LOCAL_IMAGE := customer-orders-api:local
 CI_IMAGE := customer-orders-api:ci
 
@@ -40,6 +41,7 @@ help:
 	@echo "Azure Kubernetes Service:"
 	@echo "  aks-credentials        Fetch AKS credentials from Terraform outputs"
 	@echo "  aks-nodes              List AKS nodes"
+	@echo "  aks-check              Validate Terraform AKS outputs and current kube context"
 	@echo "  k8s-render-azure       Render Azure Kubernetes manifests"
 	@echo "  k8s-apply-azure        Apply Azure Kubernetes manifests"
 	@echo "  k8s-delete-azure       Delete Azure Kubernetes manifests"
@@ -48,7 +50,8 @@ help:
 	@echo ""
 	@echo "Composite workflows:"
 	@echo "  infra-up               Apply Terraform, push image to ACR and deploy to AKS"
-	@echo "  infra-down             Delete AKS manifests and destroy Terraform resources"
+	@echo "  infra-down             Delete AKS manifests if reachable, then destroy Terraform resources"
+	@echo "  cost-check             List remaining Azure resources after destroy"
 
 .PHONY: tf-fmt
 tf-fmt:
@@ -119,40 +122,100 @@ k8s-delete-local:
 
 .PHONY: aks-credentials
 aks-credentials:
+	@RG=$$(cd $(TF_DIR) && terraform output -raw resource_group_name 2>/dev/null || true); \
+	AKS=$$(cd $(TF_DIR) && terraform output -raw aks_name 2>/dev/null || true); \
+	if [[ -z "$$RG" || -z "$$AKS" ]]; then \
+		echo "AKS credentials unavailable: Terraform outputs are empty."; \
+		echo "This is expected if the infrastructure has been destroyed."; \
+		echo "Run 'make tf-apply' first, then retry 'make aks-credentials'."; \
+		exit 1; \
+	fi; \
 	az aks get-credentials \
-		--resource-group $$(cd $(TF_DIR) && terraform output -raw resource_group_name) \
-		--name $$(cd $(TF_DIR) && terraform output -raw aks_name) \
+		--resource-group "$$RG" \
+		--name "$$AKS" \
 		--overwrite-existing
 
 .PHONY: aks-nodes
 aks-nodes:
-	kubectl get nodes -o wide
+	@kubectl get nodes -o wide || { \
+		echo "Unable to list nodes. Make sure AKS exists and credentials are configured."; \
+		echo "Run 'make tf-apply' and 'make aks-credentials' first."; \
+		exit 1; \
+	}
+
+.PHONY: aks-check
+aks-check:
+	@RG=$$(cd $(TF_DIR) && terraform output -raw resource_group_name 2>/dev/null || true); \
+	AKS=$$(cd $(TF_DIR) && terraform output -raw aks_name 2>/dev/null || true); \
+	CTX=$$(kubectl config current-context 2>/dev/null || true); \
+	if [[ -z "$$RG" || -z "$$AKS" ]]; then \
+		echo "AKS check failed: Terraform outputs are empty."; \
+		echo "This is expected if the infrastructure has been destroyed."; \
+		exit 1; \
+	fi; \
+	echo "Terraform resource group: $$RG"; \
+	echo "Terraform AKS name:       $$AKS"; \
+	echo "Current kube context:     $$CTX"; \
+	if [[ "$$CTX" != "$$AKS" ]]; then \
+		echo "Warning: current kube context does not match the Terraform AKS output."; \
+		echo "Run 'make aks-credentials' before applying Azure manifests."; \
+		exit 1; \
+	fi; \
+	echo "AKS context check passed."
 
 .PHONY: k8s-render-azure
 k8s-render-azure:
-	kubectl kustomize k8s/overlays/azure
+	kubectl kustomize $(K8S_AZURE_OVERLAY)
 
 .PHONY: k8s-apply-azure
-k8s-apply-azure:
-	kubectl apply -k k8s/overlays/azure
+k8s-apply-azure: aks-check
+	kubectl apply -k $(K8S_AZURE_OVERLAY)
 
 .PHONY: k8s-delete-azure
 k8s-delete-azure:
-	kubectl delete -k k8s/overlays/azure
+	@RG=$$(cd $(TF_DIR) && terraform output -raw resource_group_name 2>/dev/null || true); \
+	AKS=$$(cd $(TF_DIR) && terraform output -raw aks_name 2>/dev/null || true); \
+	CTX=$$(kubectl config current-context 2>/dev/null || true); \
+	if [[ -z "$$RG" || -z "$$AKS" ]]; then \
+		echo "Terraform AKS outputs are empty. Skipping Kubernetes manifest deletion."; \
+		echo "This is expected if the infrastructure has already been destroyed."; \
+		exit 0; \
+	fi; \
+	if [[ "$$CTX" != "$$AKS" ]]; then \
+		echo "Current kube context '$$CTX' does not match expected AKS context '$$AKS'."; \
+		echo "Skipping Kubernetes manifest deletion to avoid deleting resources from the wrong cluster."; \
+		exit 0; \
+	fi; \
+	kubectl delete -k $(K8S_AZURE_OVERLAY) --ignore-not-found=true
 
 .PHONY: k8s-status
-k8s-status:
+k8s-status: aks-check
 	kubectl get pods -n customer-orders
 	kubectl get nodes -o wide
 	kubectl get pvc -n customer-orders
 	kubectl get svc -n customer-orders
 
 .PHONY: k8s-port-forward
-k8s-port-forward:
+k8s-port-forward: aks-check
 	kubectl port-forward svc/customer-orders-api 8000:80 -n customer-orders
 
 .PHONY: infra-up
 infra-up: tf-apply aks-credentials docker-push-acr k8s-apply-azure k8s-status
 
 .PHONY: infra-down
-infra-down: k8s-delete-azure tf-destroy
+infra-down:
+	$(MAKE) k8s-delete-azure
+	$(MAKE) tf-destroy
+
+.PHONY: cost-check
+cost-check:
+	@echo "Resource groups:"
+	az group list --query "[].{name:name, location:location}" -o table
+	@echo ""
+	@echo "Potentially billable resources:"
+	az resource list \
+		--query "[?type=='Microsoft.ContainerService/managedClusters' || type=='Microsoft.Compute/virtualMachines' || type=='Microsoft.Compute/virtualMachineScaleSets' || type=='Microsoft.Network/loadBalancers' || type=='Microsoft.Network/publicIPAddresses' || type=='Microsoft.ContainerRegistry/registries' || type=='Microsoft.Compute/disks' || type=='Microsoft.OperationalInsights/workspaces'].{name:name, type:type, rg:resourceGroup, location:location}" \
+		-o table
+	@echo ""
+	@echo "All remaining resources:"
+	az resource list --query "[].{name:name, type:type, rg:resourceGroup, location:location}" -o table
