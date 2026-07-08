@@ -2,7 +2,7 @@
 
 This repository demonstrates the progressive migration of a legacy-style FastAPI application toward a cloud-native Azure platform.
 
-The goal is not only to deploy an application. The project shows a realistic modernization path using Docker, PostgreSQL, Kubernetes, Terraform, Azure Container Registry, AKS, GitHub Actions, OIDC authentication, and operational troubleshooting.
+The project shows a realistic modernization path using Docker, PostgreSQL, Kubernetes, Terraform, Azure Container Registry, AKS, GitHub Actions, OIDC authentication, Prometheus and Grafana.
 
 ```text
 legacy FastAPI application
@@ -16,6 +16,8 @@ legacy FastAPI application
 → CI validation
 → GitHub Actions OIDC authentication
 → manual AKS deployment workflow
+→ Prometheus/Grafana observability
+→ application metrics through /metrics
 ```
 
 ---
@@ -33,9 +35,12 @@ This lab covers:
 - storing Terraform state remotely in Azure Blob Storage;
 - pushing application images to Azure Container Registry;
 - deploying the application to Azure Kubernetes Service;
-- troubleshooting AKS, ACR, image architecture and PersistentVolume issues;
+- troubleshooting AKS, ACR, image architecture, Terraform backend and PersistentVolume issues;
 - validating the repository with GitHub Actions CI;
 - authenticating GitHub Actions to Azure with OIDC instead of long-lived client secrets;
+- deploying kube-prometheus-stack for Kubernetes observability;
+- exposing FastAPI custom metrics through `/metrics`;
+- scraping application metrics with a Prometheus `ServiceMonitor`;
 - keeping the lab cost-aware and destroyable.
 
 The project intentionally documents real operational issues, not only the final happy path.
@@ -59,9 +64,14 @@ Validated areas:
 - AKS kubelet identity integration with ACR
 - GitHub Actions CI validation workflow
 - GitHub Actions Azure OIDC authentication check
-- Manual AKS deployment workflow in progress
+- Manual AKS deployment workflow usable against existing infrastructure
 - Makefile automation and safe cleanup targets
-- Operational troubleshooting documentation
+- kube-prometheus-stack deployed on AKS
+- Prometheus and Grafana accessible through port-forward
+- FastAPI `/metrics` endpoint
+- custom application metrics
+- Prometheus `ServiceMonitor` for `customer-orders-api`
+- operational troubleshooting documentation
 
 Validated AKS state:
 
@@ -70,6 +80,28 @@ customer-orders-api   1/1   Running
 postgres-0            1/1   Running
 AKS node              Ready
 PostgreSQL PVC        Bound
+```
+
+Validated observability state:
+
+```text
+monitoring namespace      OK
+Prometheus                OK
+Grafana                   OK
+Alertmanager              OK
+kube-state-metrics        OK
+node-exporter             OK
+/metrics endpoint         OK
+ServiceMonitor            OK
+custom app metrics        OK
+```
+
+Example application metrics:
+
+```text
+customer_orders_http_requests_total
+customer_orders_http_request_duration_seconds
+customer_orders_failed_orders_total
 ```
 
 ---
@@ -96,39 +128,18 @@ Developer workstation
 │       ├── System-assigned managed identity
 │       ├── Kubelet identity with AcrPull on ACR
 │       ├── FastAPI Deployment
-│       └── PostgreSQL StatefulSet + PVC
+│       ├── PostgreSQL StatefulSet + PVC
+│       └── monitoring namespace
+│           ├── Prometheus
+│           ├── Grafana
+│           ├── Alertmanager
+│           ├── kube-state-metrics
+│           └── node-exporter
 │
 └── GitHub Actions
     ├── CI validation workflow
     ├── Azure OIDC authentication check
     └── Manual AKS deployment workflow
-```
-
----
-
-## Repository Structure
-
-```text
-.
-├── legacy-app/
-├── containerized-app/
-├── k8s/
-│   ├── base/
-│   └── overlays/
-│       ├── local/
-│       └── azure/
-├── infra/
-│   └── terraform/
-│       ├── modules/
-│       ├── main.tf
-│       ├── providers.tf
-│       ├── variables.tf
-│       └── outputs.tf
-├── scripts/
-├── docs/
-├── .github/
-│   └── workflows/
-└── Makefile
 ```
 
 ---
@@ -141,8 +152,6 @@ Developer workstation
 cd containerized-app
 docker compose up --build
 ```
-
-Test:
 
 ```bash
 curl http://127.0.0.1:8000/health
@@ -178,6 +187,34 @@ make k8s-apply-azure
 make k8s-status
 ```
 
+### Observability
+
+```bash
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --create-namespace \
+  --values monitoring/kube-prometheus-stack-values.yaml
+```
+
+Grafana:
+
+```bash
+kubectl port-forward svc/monitoring-grafana 3000:80 -n monitoring
+```
+
+Prometheus:
+
+```bash
+kubectl port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090 -n monitoring
+```
+
+Application metrics:
+
+```bash
+kubectl port-forward svc/customer-orders-api 8000:80 -n customer-orders
+curl http://localhost:8000/metrics | grep customer_orders
+```
+
 ### Cleanup
 
 ```bash
@@ -188,8 +225,6 @@ make cost-check
 ---
 
 ## Documentation
-
-Detailed documentation:
 
 - [Architecture](docs/architecture.md)
 - [Migration Plan](docs/migration-plan.md)
@@ -204,34 +239,45 @@ Detailed documentation:
 
 ---
 
-## Cost Guardrails
+## Current Known Limitation
 
-The lab is designed to be ephemeral:
+The manual GitHub Actions deployment workflow works when Azure infrastructure already exists.
 
-- one AKS node only;
-- controlled VM size;
-- no public LoadBalancer by default;
-- no managed Grafana at first;
-- no Log Analytics at first;
-- ClusterIP service with local port-forward for validation;
-- explicit destroy workflow;
-- post-destroy resource verification.
+Creating AKS directly from GitHub Actions with the OIDC service principal may fail on Azure for Students with a region policy error, even when the same Terraform apply works from the local Azure user session.
+
+Current practical workflow:
+
+```text
+Create Azure infrastructure from local Terraform
+→ Run GitHub Actions deployment with apply_infra=false
+→ Validate build, push, kubectl apply and rollout
+```
 
 ---
 
 ## Next Planned Steps
 
+Recommended consolidation tasks:
+
 ```text
-V9.3  Stabilize manual AKS deployment workflow
-V9.4  Add rollout validation and smoke tests
-V10   Add Prometheus/Grafana observability
-V11   Add runbooks and RCA notes
-V12   Add Azure Key Vault integration
-V13   Optional GitOps with Argo CD
-V14   Optional Kafka/event-driven extension
+1. Commit application metrics and ServiceMonitor changes
+2. Update docs and README
+3. Capture Grafana and Prometheus validation screenshots
+4. Destroy Azure resources after validation
+5. Prepare interview explanation
 ```
 
-Kafka is intentionally placed after observability because it adds more moving parts and cost. Prometheus and Grafana provide more immediate value for a DevOps/Platform portfolio project.
+Optional future phases:
+
+```text
+V11   Add Grafana dashboard JSON or screenshots
+V12   Add alerting rules
+V13   Add Azure Key Vault integration
+V14   Optional GitOps with Argo CD
+V15   Optional Kafka/event-driven extension
+```
+
+Kafka, Argo CD and Key Vault are intentionally deferred. The current project is already substantial and should be consolidated before adding more platform components.
 
 ---
 
@@ -240,7 +286,9 @@ Kafka is intentionally placed after observability because it adds more moving pa
 ```text
 I built a progressive Azure migration lab starting from a legacy-style FastAPI application, then modernized it through Docker, Docker Compose, Kubernetes, Kustomize, PostgreSQL StatefulSets, Terraform modules, Azure Container Registry, remote Terraform state, and AKS.
 
-The project includes real troubleshooting work: Azure region and VM SKU restrictions, AKS/ACR authentication through kubelet managed identity, image architecture mismatch from macOS ARM to AKS linux/amd64, PostgreSQL PersistentVolume initialization issues caused by lost+found on the mounted volume, and Terraform backend authentication through GitHub Actions OIDC.
+The project includes real troubleshooting work: Azure region and VM SKU restrictions, AKS/ACR authentication through kubelet managed identity, image architecture mismatch from macOS ARM to AKS linux/amd64, PostgreSQL PersistentVolume initialization issues caused by lost+found on the mounted volume, GitHub Actions OIDC authentication, and Terraform backend permissions on Azure Blob Storage.
 
-The lab is cost-aware, reproducible, documented, and designed around operational practices: CI validation, manual deployment workflows, safe cleanup, troubleshooting notes, and planned observability.
+I also added observability with kube-prometheus-stack. Prometheus and Grafana monitor the Kubernetes platform, and the FastAPI application exposes custom Prometheus metrics through a /metrics endpoint. A ServiceMonitor allows Prometheus to scrape the application automatically, giving visibility into request volume, latency histograms and failed order counts.
+
+The lab is cost-aware, reproducible, documented, and designed around operational practices: CI validation, manual deployment workflows, safe cleanup, troubleshooting notes and observability.
 ```

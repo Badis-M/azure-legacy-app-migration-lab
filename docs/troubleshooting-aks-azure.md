@@ -2,7 +2,7 @@
 
 > Public documentation uses placeholders for concrete Azure resource names. The troubleshooting flow, commands and root causes are preserved, but temporary personal cloud resource identifiers are not exposed.
 
-This document captures the main issues encountered while deploying the `customer-orders` application to Azure Kubernetes Service.
+This document captures the main issues encountered while deploying and operating the `customer-orders` application on Azure Kubernetes Service.
 
 The goal is to show the operational troubleshooting path, not only the final working state.
 
@@ -10,7 +10,7 @@ The goal is to show the operational troubleshooting path, not only the final wor
 
 ## Final Validated State
 
-The deployment was considered successful once these checks passed:
+Application validation:
 
 ```bash
 kubectl get pods -n customer-orders
@@ -28,6 +28,26 @@ aks-system-xxxxxxxx-vmss000000         Ready
 postgres-data-postgres-0               Bound
 ```
 
+Observability validation:
+
+```bash
+kubectl get pods -n monitoring
+kubectl get svc -n monitoring
+kubectl get servicemonitor -n customer-orders
+curl http://localhost:8000/metrics | grep customer_orders
+```
+
+Expected state:
+
+```text
+Prometheus                  Running
+Grafana                     Running
+Alertmanager                Running
+ServiceMonitor              Present
+/metrics                    200 OK
+customer_orders_* metrics   Present
+```
+
 ---
 
 ## Architecture Context
@@ -41,17 +61,10 @@ The lab deploys:
 - Kubernetes manifests managed with Kustomize overlays;
 - Azure infrastructure managed with Terraform;
 - remote Terraform state in Azure Blob Storage;
+- GitHub Actions OIDC authentication;
+- kube-prometheus-stack for monitoring;
+- FastAPI custom metrics scraped through a ServiceMonitor;
 - cost-controlled single-node AKS.
-
-Main placeholders:
-
-```text
-Resource Group: <app-resource-group>
-ACR:            <acr-name>
-ACR login:      <acr-login-server>
-AKS:            <aks-cluster-name>
-Namespace:      customer-orders
-```
 
 ---
 
@@ -59,9 +72,7 @@ Namespace:      customer-orders
 
 ### Symptoms
 
-AKS creation failed before application deployment.
-
-Observed error patterns:
+AKS creation failed with errors such as:
 
 ```text
 VMSizeNotSupported
@@ -69,35 +80,9 @@ ErrCode_InsufficientVCPUQuota
 RequestDisallowedByAzure
 ```
 
-### Investigation
-
-The Terraform configuration was valid. The failures came from Azure-side constraints:
-
-- restricted Azure for Students subscription behavior;
-- region restrictions;
-- unavailable VM SKUs;
-- family-level vCPU quota;
-- real-time capacity constraints.
-
-Observed pattern:
-
-| Region | Result |
-|---|---|
-| `francecentral` | Accepted for Resource Group and ACR, but low-cost AKS VM sizes were unavailable or rejected. |
-| `westeurope` | Some VM sizes appeared visible but AKS creation was blocked by policy. |
-| `northeurope` | Blocked by subscription or regional policy. |
-| `austriaeast` | Accepted with a usable VM size. |
-
 ### Root Cause
 
-AKS provisioning depends on more than Terraform syntax:
-
-- AKS regional availability;
-- subscription-level policies;
-- VM SKU availability;
-- vCPU quota;
-- VM family quota;
-- regional capacity.
+The Azure for Students subscription had restricted access to some regions, VM SKUs and quotas.
 
 ### Resolution
 
@@ -109,25 +94,16 @@ aks_location     = "austriaeast"
 aks_node_vm_size = "Standard_B2s_v2"
 ```
 
-The Resource Group and ACR stayed in France Central. AKS was deployed in Austria East.
-
 Validation:
 
 ```bash
-az aks get-credentials   --resource-group <app-resource-group>   --name <aks-cluster-name>   --overwrite-existing
+az aks get-credentials \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
+  --overwrite-existing
 
 kubectl get nodes -o wide
 ```
-
-Expected:
-
-```text
-aks-system-xxxxxxxx-vmss000000   Ready
-```
-
-### Lesson
-
-For restricted or student subscriptions, region and SKU selection are part of the infrastructure design.
 
 ### Interview Takeaway
 
@@ -139,50 +115,23 @@ I had to troubleshoot Azure subscription-level constraints before reaching the K
 
 ### Symptoms
 
-The Azure overlay appeared to fail with `ImagePullBackOff`, but the terminal was still pointing to the local kind context.
-
-Example context:
-
-```text
-kind-azure-migration-lab
-```
+Azure manifests were applied while `kubectl` was still targeting the local kind cluster.
 
 ### Root Cause
 
-The Azure overlay was applied while `kubectl` was targeting the local kind cluster.
-
-The Azure overlay referenced a private ACR image:
-
-```text
-<acr-login-server>/customer-orders-api:dev
-```
-
-The local kind cluster had no ACR pull credentials, so the pod failed.
+The active kubeconfig context was wrong.
 
 ### Resolution
 
-Fetch AKS credentials:
-
 ```bash
-az aks get-credentials   --resource-group <app-resource-group>   --name <aks-cluster-name>   --overwrite-existing
-```
+az aks get-credentials \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
+  --overwrite-existing
 
-Validate context:
-
-```bash
 kubectl config current-context
 kubectl get nodes -o wide
 ```
-
-Expected context:
-
-```text
-<aks-cluster-name>
-```
-
-### Lesson
-
-Always verify Kubernetes context before applying cloud manifests.
 
 ### Interview Takeaway
 
@@ -194,50 +143,12 @@ I caught a deployment-context issue where cloud manifests were initially applied
 
 ### Symptoms
 
-API pod scheduled on AKS but could not pull the image.
-
-Pod status:
-
 ```text
 ErrImagePull
 ImagePullBackOff
-```
-
-Events included:
-
-```text
-failed to authorize
-failed to fetch anonymous token
 401 Unauthorized
-```
-
-Another message indicated a possible architecture issue:
-
-```text
 no match for platform in manifest
 ```
-
-### Investigation
-
-Verify image exists:
-
-```bash
-az acr repository show-tags   --name <acr-name>   --repository customer-orders-api   --output table
-```
-
-Check kubelet identity:
-
-```bash
-az aks show   --resource-group <app-resource-group>   --name <aks-cluster-name>   --query "identityProfile.kubeletidentity"
-```
-
-Important distinction:
-
-```text
-kubeletidentity.clientId != kubeletidentity.objectId
-```
-
-For role assignment, use the object ID.
 
 ### Root Cause
 
@@ -248,32 +159,31 @@ Two issues contributed:
 
 ### Resolution
 
-Assign `AcrPull` to kubelet identity object ID:
-
 ```bash
 ACR_ID=$(az acr show --name <acr-name> --query id -o tsv)
 
-KUBELET_OBJECT_ID=$(az aks show   --resource-group <app-resource-group>   --name <aks-cluster-name>   --query "identityProfile.kubeletidentity.objectId"   -o tsv)
+KUBELET_OBJECT_ID=$(az aks show \
+  --resource-group <app-resource-group> \
+  --name <aks-cluster-name> \
+  --query "identityProfile.kubeletidentity.objectId" \
+  -o tsv)
 
-az role assignment create   --assignee-object-id "$KUBELET_OBJECT_ID"   --assignee-principal-type ServicePrincipal   --role AcrPull   --scope "$ACR_ID"
+az role assignment create \
+  --assignee-object-id "$KUBELET_OBJECT_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role AcrPull \
+  --scope "$ACR_ID"
 ```
 
-Rebuild and push for AKS node platform:
+Rebuild for AKS node architecture:
 
 ```bash
-docker buildx build   --platform linux/amd64   -t <acr-login-server>/customer-orders-api:dev   ./containerized-app   --push
+docker buildx build \
+  --platform linux/amd64 \
+  -t <acr-login-server>/customer-orders-api:dev \
+  ./containerized-app \
+  --push
 ```
-
-Restart deployment:
-
-```bash
-kubectl rollout restart deployment/customer-orders-api -n customer-orders
-kubectl get pods -n customer-orders
-```
-
-### Lesson
-
-For ACR pull failures, check both cloud identity and container image architecture.
 
 ### Interview Takeaway
 
@@ -285,18 +195,8 @@ The ACR issue required troubleshooting both identity and image architecture. I v
 
 ### Symptoms
 
-PostgreSQL pod started but crashed repeatedly.
-
-Pod status:
-
 ```text
 postgres-0   0/1   CrashLoopBackOff
-```
-
-The useful logs came from:
-
-```bash
-kubectl logs postgres-0 -n customer-orders --previous
 ```
 
 Logs:
@@ -304,23 +204,13 @@ Logs:
 ```text
 initdb: error: directory "/var/lib/postgresql/data" exists but is not empty
 initdb: detail: It contains a lost+found directory
-initdb: hint: Using a mount point directly as the data directory is not recommended.
-Create a subdirectory under the mount point.
 ```
 
 ### Root Cause
 
-The PostgreSQL container mounted the PersistentVolume directly at:
-
-```text
-/var/lib/postgresql/data
-```
-
-On AKS, the provisioned disk contained a filesystem-level `lost+found` directory. PostgreSQL refused to initialize directly in a non-empty directory.
+PostgreSQL was initializing directly at the root of the mounted volume, which contained a filesystem-level `lost+found` directory.
 
 ### Resolution
-
-Set `PGDATA` to a subdirectory inside the mounted volume:
 
 ```yaml
 env:
@@ -328,23 +218,13 @@ env:
     value: /var/lib/postgresql/data/pgdata
 ```
 
-Because the first initialization had already failed on the PVC, recreate the StatefulSet and PVC for this lab environment:
+Then recreate the failed StatefulSet/PVC for the lab:
 
 ```bash
 kubectl delete statefulset postgres -n customer-orders
 kubectl delete pvc postgres-data-postgres-0 -n customer-orders
 make k8s-apply-azure
 ```
-
-Expected result:
-
-```text
-postgres-0   1/1   Running
-```
-
-### Lesson
-
-For database StatefulSets, avoid using the mount point itself as the database data directory.
 
 ### Interview Takeaway
 
@@ -356,10 +236,6 @@ The PostgreSQL issue was diagnosed from container logs. I identified the `lost+f
 
 ### Symptoms
 
-The Azure OIDC check workflow succeeded, but the manual deployment workflow failed at `terraform init`.
-
-Error:
-
 ```text
 Error building ARM Config:
 Authenticating using the Azure CLI is only supported as a User
@@ -368,13 +244,9 @@ not a Service Principal.
 
 ### Root Cause
 
-`azure/login` authenticated Azure CLI as a service principal through OIDC.
-
-Terraform did not automatically use that authentication mode. It attempted to use Azure CLI authentication as if it were a user session.
+`azure/login` authenticated Azure CLI through OIDC, but Terraform needed explicit OIDC environment variables.
 
 ### Resolution
-
-Add Terraform OIDC environment variables to the workflow:
 
 ```yaml
 env:
@@ -384,10 +256,6 @@ env:
   ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 ```
-
-### Lesson
-
-Azure CLI OIDC login and Terraform OIDC provider/backend authentication are related but not identical. Terraform needs explicit `ARM_*` variables.
 
 ### Interview Takeaway
 
@@ -399,8 +267,6 @@ I validated GitHub Actions OIDC with Azure CLI, then adapted Terraform authentic
 
 ### Symptoms
 
-After configuring Terraform OIDC variables, `terraform init` reached the backend but failed with:
-
 ```text
 StatusCode=403
 AuthorizationPermissionMismatch
@@ -411,8 +277,6 @@ Failed to get existing workspaces: containers.Client#ListBlobs
 
 The service principal had management-plane access but lacked data-plane access to the Terraform state blob container.
 
-`Contributor` can manage Azure resources, but reading and writing blobs requires a Storage Blob role.
-
 ### Resolution
 
 Assign:
@@ -421,29 +285,16 @@ Assign:
 Storage Blob Data Contributor
 ```
 
-to the GitHub Actions service principal on the Terraform state container scope.
+at the Terraform state container scope.
 
 Example:
 
 ```bash
-APP_ID="<azure-client-id>"
-TFSTATE_STORAGE_ID="<tfstate-storage-account-resource-id>"
-TFSTATE_CONTAINER_SCOPE="${TFSTATE_STORAGE_ID}/blobServices/default/containers/tfstate"
-
-az role assignment create   --assignee "$APP_ID"   --role "Storage Blob Data Contributor"   --scope "$TFSTATE_CONTAINER_SCOPE"
+az role assignment create \
+  --assignee "<azure-client-id>" \
+  --role "Storage Blob Data Contributor" \
+  --scope "<tfstate-storage-account-id>/blobServices/default/containers/tfstate"
 ```
-
-Verify:
-
-```bash
-az role assignment list   --assignee "$APP_ID"   --scope "$TFSTATE_CONTAINER_SCOPE"   --query "[].{role:roleDefinitionName, principalType:principalType, scope:scope}"   -o table
-```
-
-Wait several minutes for RBAC propagation before retesting.
-
-### Lesson
-
-Terraform remote state on Azure Blob Storage needs data-plane permissions. Management-plane permissions alone are not enough.
 
 ### Interview Takeaway
 
@@ -451,28 +302,167 @@ I diagnosed a Terraform backend 403 by distinguishing Azure management-plane RBA
 
 ---
 
+## Issue 7 — GitHub Actions Service Principal Cannot Create AKS in Region
+
+### Symptoms
+
+GitHub Actions could authenticate, read the backend, create the Resource Group and create ACR, but failed when creating AKS:
+
+```text
+RequestDisallowedByAzure
+The selected region is currently not accepting new customers
+locationineligible
+```
+
+The same Terraform apply worked from the Mac with the interactive Azure user.
+
+### Root Cause
+
+The practical conclusion:
+
+```text
+Local Azure user can create AKS in the selected region.
+GitHub Actions OIDC service principal is blocked by Azure region/subscription policy for AKS creation.
+```
+
+### Resolution / Workaround
+
+```text
+Infrastructure creation: local Terraform apply from the Mac.
+Application deployment: GitHub Actions workflow with apply_infra=false.
+```
+
+### Interview Takeaway
+
+I compared Terraform apply from GitHub Actions and from a local Azure user session. This isolated the issue to Azure policy evaluation for the service principal, not the Terraform code itself.
+
+---
+
+## Issue 8 — Grafana Port-Forward Connection Refused
+
+### Symptoms
+
+```text
+failed to connect to localhost:3000 inside namespace
+connect: connection refused
+error: lost connection to pod
+```
+
+### Root Cause
+
+Grafana was not ready yet, or the service endpoint selected a pod before the container was ready.
+
+### Resolution
+
+```bash
+kubectl get pods -n monitoring -o wide
+kubectl rollout status deployment/monitoring-grafana -n monitoring --timeout=180s
+kubectl get svc -n monitoring
+kubectl get endpoints -n monitoring monitoring-grafana
+```
+
+Then retry:
+
+```bash
+kubectl port-forward svc/monitoring-grafana 3000:80 -n monitoring
+```
+
+### Interview Takeaway
+
+I diagnosed the Grafana access issue by validating pod readiness, service endpoints and rollout state before retrying port-forward.
+
+---
+
+## Issue 9 — FastAPI `/metrics` Returned 404 After Code Change
+
+### Symptoms
+
+The source code contained `/metrics`, but the deployed API returned:
+
+```text
+{"detail":"Not Found"}
+```
+
+### Root Cause
+
+The running AKS pod was still using an older image without the `/metrics` endpoint.
+
+### Resolution
+
+Push a unique image tag and update the deployment:
+
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  -t <acr-login-server>/customer-orders-api:metrics-v1 \
+  ./containerized-app \
+  --push
+```
+
+```bash
+kubectl set image deployment/customer-orders-api \
+  customer-orders-api=<acr-login-server>/customer-orders-api:metrics-v1 \
+  -n customer-orders
+
+kubectl rollout status deployment/customer-orders-api -n customer-orders
+```
+
+Validate:
+
+```bash
+curl http://localhost:8000/metrics | grep customer_orders
+```
+
+Expected:
+
+```text
+customer_orders_http_requests_total
+customer_orders_http_request_duration_seconds
+customer_orders_failed_orders_total
+```
+
+### Interview Takeaway
+
+I diagnosed a mismatch between source code and running container image, then used a unique image tag and rollout validation to confirm that the application metrics endpoint was deployed correctly.
+
+---
+
 ## Final Validation Commands
+
+Application:
 
 ```bash
 kubectl get pods -n customer-orders
-kubectl get nodes -o wide
 kubectl get pvc -n customer-orders
 kubectl get svc -n customer-orders
-```
-
-Optional API test:
-
-```bash
 kubectl port-forward svc/customer-orders-api 8000:80 -n customer-orders
 ```
 
-Then:
+API validation:
 
 ```bash
 curl http://localhost:8000/health
 curl http://localhost:8000/api/customers
 curl http://localhost:8000/api/orders
 curl http://localhost:8000/api/orders/failed
+curl http://localhost:8000/metrics | grep customer_orders
+```
+
+Monitoring:
+
+```bash
+kubectl get pods -n monitoring
+kubectl get svc -n monitoring
+kubectl get servicemonitor -n customer-orders
+```
+
+Prometheus:
+
+```promql
+up{namespace="customer-orders"}
+customer_orders_http_requests_total
+customer_orders_http_request_duration_seconds_count
+customer_orders_failed_orders_total
 ```
 
 ---
@@ -487,6 +477,9 @@ curl http://localhost:8000/api/orders/failed
 | PostgreSQL CrashLoopBackOff | `lost+found` in mounted PersistentVolume | Set `PGDATA` to a subdirectory and recreate PVC |
 | Terraform OIDC auth error | Terraform not configured for service principal OIDC | Set `ARM_USE_OIDC` and related `ARM_*` variables |
 | Terraform backend 403 | Missing Storage Blob data-plane permission | Assign `Storage Blob Data Contributor` on state container |
+| GitHub Actions AKS creation blocked | Service principal blocked by Azure policy for AKS region | Create infra locally, run workflow with `apply_infra=false` |
+| Grafana port-forward refused | Pod/service not ready yet | Validate rollout/endpoints and retry |
+| `/metrics` returned 404 | Running pod used older image | Push unique image tag and rollout deployment |
 
 ---
 
@@ -496,6 +489,6 @@ curl http://localhost:8000/api/orders/failed
 - AKS and ACR integration: https://learn.microsoft.com/en-us/azure/aks/cluster-container-registry-integration
 - ACR authentication options for Kubernetes: https://learn.microsoft.com/en-us/azure/container-registry/authenticate-kubernetes-options
 - Kubernetes images and ImagePullBackOff: https://kubernetes.io/docs/concepts/containers/images/
-- Kubernetes events: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_events/
 - Terraform azurerm backend: https://developer.hashicorp.com/terraform/language/backend/azurerm
+- kube-prometheus-stack Helm chart: https://artifacthub.io/packages/helm/prometheus-community/kube-prometheus-stack
 - PostgreSQL Docker image issue about `lost+found`: https://github.com/docker-library/postgres/issues/1163
