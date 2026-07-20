@@ -35,3 +35,7 @@ kubeconfig*
 
 # Logs
 *.log
+
+# Local Codex context
+/AGENTS.md
+/docs/PROJECT_CONTEXT.md
